@@ -5,7 +5,7 @@ local CONFIG = {
    
     -- Script extra que se ejecuta al iniciar (SOLO COLOCAR LA URL)
     -- Dejar vacio ("") para desactivar.
-    SECOND_SCRIPT_URL = "[https://raw.githubusercontent.com/rysted-rbx/free/main/dmvs](https://raw.githubusercontent.com/rysted-rbx/free/main/dmvs)",
+    SECOND_SCRIPT_URL = "[https://raw.githubusercontent.com/rysted-rbx/free/main/dmvs]",
 
     -- (OPCIONAL) webhook de Discord para notificaciones, dejar vacio para desactivar
     WEBHOOK = {
